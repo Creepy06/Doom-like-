@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
+<title>RetroFPS — Jeu style "Doom-like" (HTML5)</title>
+<style>
+  html,body {height:100%;margin:0;background:#111;color:#ddd;font-family:system-ui, -apple-system, sans-serif;}
+  #game {display:block;width:100%;height:100vh;background:#000;touch-action:none;}
+  .ui {position:fixed;left:8px;bottom:8px;z-index:30;color:#fff;opacity:0.9;}
+  #controls {position:fixed;right:8px;bottom:8px;z-index:30;display:flex;flex-direction:column;gap:8px;}
+  .btn {background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);padding:10px;border-radius:10px;font-weight:700;}
+  #joystick {position:fixed;left:10px;bottom:80px;width:120px;height:120px;border-radius:60px;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center;touch-action:none;}
+  #stick {width:56px;height:56px;border-radius:28px;background:rgba(255,255,255,0.12);}
+  #fire {width:76px;height:76px;border-radius:38px;background:rgba(255,0,0,0.18);display:flex;align-items:center;justify-content:center;font-weight:900;}
+  #hud {position:fixed;left:50%;transform:translateX(-50%);top:8px;color:#fff;z-index:40;font-weight:700;}
+  #message {position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:50;color:#fff;background:rgba(0,0,0,0.6);padding:12px;border-radius:8px;display:none;}
+  small{opacity:0.7;font-weight:400}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Vie: <span id="hp">100</span> &nbsp; Munitions: <span id="ammo">50</span></div>
+<div id="joystick"><div id="stick"></div></div>
+<div id="controls">
+  <div id="fire" class="btn">TIR</div>
+  <button id="reload" class="btn">RECHARGER</button>
+  <button id="reset" class="btn">RESTART</button>
+</div>
+<div id="message"></div>
+<script>
+(() => {
+  // --- Retro raycasting FPS (minimal) ---
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = canvas.width = innerWidth;
+  let H = canvas.height = innerHeight;
+  const hudHP = document.getElementById('hp');
+  const hudAmmo = document.getElementById('ammo');
+  const message = document.getElementById('message');
+
+  // map: 0 empty, 1..n wall types
+  const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,2,0,0,0,0,2,0,0,0,1],
+    [1,0,0,0,3,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,2,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,2,0,0,0,3,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,2,0,0,1],
+    [1,0,0,0,2,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,3,0,0,0,1],
+    [1,0,0,0,0,2,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+  ];
+  const MAPW = MAP[0].length;
+  const MAPH = MAP.length;
+  const TILE = 64; // logical tile size
+  // player
+  const player = { x: TILE*2.5, y: TILE*2.5, ang: 0.0, speed: 0, strafe: 0, hp:100, ammo:50 };
+  let lastTime = performance.now();
+
+  // controls
+  const keys = {};
+  addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+  addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+  addEventListener('resize', () => { W = canvas.width = innerWidth; H = canvas.height = innerHeight; });
+
+  // simple enemies (static sprites)
+  const enemies = [
+    {x:TILE*7.5, y:TILE*4.5, hp:30, alive:true, size:0.6},
+    {x:TILE*9.2, y:TILE*8.2, hp:30, alive:true, size:0.6},
+    {x:TILE*4.5, y:TILE*8.5, hp:30, alive:true, size:0.6},
+  ];
+
+  // touch joystick
+  const stick = document.getElementById('stick');
+  const joystick = document.getElementById('joystick');
+  let joyCenter = {x: joystick.offsetLeft + joystick.offsetWidth/2, y: joystick.offsetTop + joystick.offsetHeight/2};
+  let stickTouchId = null;
+  let stickPos = {x:0,y:0};
+  function updateJoyCenter(){ joyCenter = {x: joystick.offsetLeft + joystick.offsetWidth/2, y: joystick.offsetTop + joystick.offsetHeight/2}; }
+  updateJoyCenter();
+  window.addEventListener('orientationchange', updateJoyCenter);
+  joystick.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    stickTouchId = t.identifier;
+  });
+  joystick.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for(const t of e.changedTouches){
+      if(t.identifier === stickTouchId){
+        const dx = t.clientX - joyCenter.x;
+        const dy = t.clientY - joyCenter.y;
+        const max = 40;
+        const mag = Math.min(Math.hypot(dx,dy), max);
+        const nx = dx / (mag||1) * mag;
+        const ny = dy / (mag||1) * mag;
+        stick.style.transform = `translate(${nx}px, ${ny}px)`;
+        stickPos.x = nx / max;
+        stickPos.y = ny / max;
+      }
+    }
+  });
+  joystick.addEventListener('touchend', e => {
+    for(const t of e.changedTouches){
+      if(t.identifier === stickTouchId){
+        stickTouchId = null;
+        stickPos = {x:0,y:0};
+        stick.style.transform = `translate(0px,0px)`;
+      }
+    }
+  });
+
+  // look / fire touch on right half
+  let lookTouchId = null;
+  let lastLookX = 0;
+  canvas.addEventListener('touchstart', e => {
+    for(const t of e.changedTouches){
+      if(t.clientX > innerWidth/2 && lookTouchId === null){
+        lookTouchId = t.identifier;
+        lastLookX = t.clientX;
+      }
+    }
+  });
+  canvas.addEventListener('touchmove', e => {
+    for(const t of e.changedTouches){
+      if(t.identifier === lookTouchId){
+        const dx = t.clientX - lastLookX;
+        player.ang += dx * 0.004;
+        lastLookX = t.clientX;
+      }
+    }
+  });
+  canvas.addEventListener('touchend', e => {
+    for(const t of e.changedTouches){
+      if(t.identifier === lookTouchId) lookTouchId = null;
+    }
+  });
+
+  // fire button
+  document.getElementById('fire').addEventListener('touchstart', e => { e.preventDefault(); fire(); });
+  document.getElementById('fire').addEventListener('mousedown', e => { e.preventDefault(); fire(); });
+  document.getElementById('reload').addEventListener('click', reload);
+  document.getElementById('reset').addEventListener('click', resetGame);
+
+  // mouse look for desktop
+  let isMouseDown = false;
+  canvas.addEventListener('mousedown', e => { isMouseDown = true; lastLookX = e.clientX; });
+  canvas.addEventListener('mousemove', e => { if(isMouseDown){ const dx = e.clientX - lastLookX; player.ang += dx * 0.01; lastLookX = e.clientX; }});
+  canvas.addEventListener('mouseup', e => isMouseDown = false);
+  canvas.addEventListener('click', e => { if(e.clientX > innerWidth/2) fire(); });
+
+  function reload(){ player.ammo = 50; hudAmmo.textContent = player.ammo; showMessage("Rechargé"); }
+  function resetGame(){ player.x = TILE*2.5; player.y = TILE*2.5; player.ang = 0; player.hp = 100; player.ammo = 50; enemies.forEach(en=>{en.hp=30;en.alive=true}); hudHP.textContent=player.hp; hudAmmo.textContent=player.ammo; showMessage("Restart"); }
+
+  function showMessage(txt, t=1000){ message.textContent = txt; message.style.display='block'; setTimeout(()=>message.style.display='none', t); }
+
+  // helper: check map collision
+  function mapAt(x,y){
+    const mx = Math.floor(x / TILE);
+    const my = Math.floor(y / TILE);
+    if(mx < 0 || mx >= MAPW || my < 0 || my >= MAPH) return 1;
+    return MAP[my][mx] || 0;
+  }
+  function isBlocked(x,y){
+    return mapAt(x,y) !== 0;
+  }
+
+  // simple raycaster render
+  function render(){
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0,0,W,H);
+
+    // sky and floor
+    const half = H/2;
+    ctx.fillStyle = '#2b2b2b';
+    ctx.fillRect(0,0,W,half);
+    ctx.fillStyle = '#0e0e0e';
+    ctx.fillRect(0,half,W,H-half);
+
+    const fov = Math.PI/3; // 60deg
+    const numRays = Math.min(W, 360); // limit to 360 vertical columns for perf
+    const stripW = W/numRays;
+    for(let i=0;i<numRays;i++){
+      const rayScreenPos = (i/numRays) - 0.5;
+      const rayAngle = player.ang + rayScreenPos * fov;
+      // cast
+      let distToWall = 0;
+      let hit = false;
+      let side = 0;
+      const stepSize = 5;
+      let hitType = 0;
+      let eyeX = Math.cos(rayAngle);
+      let eyeY = Math.sin(rayAngle);
+      while(!hit && distToWall < 1000){
+        distToWall += stepSize;
+        const testX = player.x + eyeX * distToWall;
+        const testY = player.y + eyeY * distToWall;
+        if(testX < 0 || testX >= MAPW*TILE || testY < 0 || testY >= MAPH*TILE){ hit=true; distToWall=1000; hitType=1; break; }
+        const m = mapAt(testX,testY);
+        if(m !== 0){ hit=true; hitType=m; break; }
+      }
+      // distance correction (fish-eye)
+      const corrected = distToWall * Math.cos(rayAngle - player.ang);
+      const lineHeight = Math.min(H, (TILE*4*300)/corrected);
+      const y1 = Math.floor(half - lineHeight/2);
+      const y2 = Math.floor(half + lineHeight/2);
+
+      // wall shade by hitType and distance
+      const shade = Math.max(0, 255 - corrected*0.06);
+      let color;
+      if(hitType===1) color = `rgb(${Math.floor(shade*0.6)},${Math.floor(shade*0.1)},${Math.floor(shade*0.1)})`;
+      else if(hitType===2) color = `rgb(${Math.floor(shade*0.1)},${Math.floor(shade*0.6)},${Math.floor(shade*0.1)})`;
+      else if(hitType===3) color = `rgb(${Math.floor(shade*0.1)},${Math.floor(shade*0.1)},${Math.floor(shade*0.6)})`;
+      else color = `rgb(${Math.floor(shade)},${Math.floor(shade)},${Math.floor(shade)})`;
+
+      ctx.fillStyle = color;
+      ctx.fillRect(Math.floor(i*stripW), y1, Math.ceil(stripW)+1, Math.ceil(y2-y1));
+      // simple vertical lines for detail
+      ctx.fillStyle = 'rgba(0,0,0,0.06)';
+      ctx.fillRect(Math.floor(i*stripW), y1, 1, y2-y1);
+    }
+
+    // draw simple sprites (enemies) — project to screen
+    enemies.forEach(e => {
+      if(!e.alive) return;
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angleTo = Math.atan2(dy,dx) - player.ang;
+      const angNorm = Math.atan2(Math.sin(angleTo), Math.cos(angleTo));
+      const fovHalf = fov/2;
+      if(Math.abs(angNorm) > fovHalf) return;
+      const sizeOnScreen = (TILE * 250) / dist;
+      const screenX = W/2 + Math.tan(angNorm) * (W/2) * 1.2;
+      const screenY = H/2 - sizeOnScreen/2;
+      const alpha = Math.max(0, Math.min(1, 1 - (dist/900)));
+      // simple enemy box
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'rgba(200,80,80,0.95)';
+      ctx.fillRect(screenX - sizeOnScreen/2, screenY, sizeOnScreen, sizeOnScreen);
+      // health bar
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(screenX - sizeOnScreen/2, screenY - 8, sizeOnScreen, 6);
+      ctx.fillStyle = 'rgba(0,200,80,0.9)';
+      ctx.fillRect(screenX - sizeOnScreen/2, screenY - 8, sizeOnScreen * (e.hp/30), 6);
+      ctx.globalAlpha = 1;
+    });
+
+    // simple crosshair
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.moveTo(W/2 - 8, H/2);
+    ctx.lineTo(W/2 + 8, H/2);
+    ctx.moveTo(W/2, H/2 - 8);
+    ctx.lineTo(W/2, H/2 + 8);
+    ctx.stroke();
+  }
+
+  // shooting: ray to nearest enemy; reduce hp if hit
+  function fire(){
+    if(player.ammo <= 0){ showMessage("Plus de munitions !"); return; }
+    player.ammo--; hudAmmo.textContent = player.ammo;
+    // sound-like flash
+    flash();
+
+    // cast a thin ray to hit enemies
+    let best = null;
+    enemies.forEach(e => {
+      if(!e.alive) return;
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const ang = Math.atan2(dy,dx);
+      const diff = Math.abs(Math.atan2(Math.sin(ang - player.ang), Math.cos(ang - player.ang)));
+      if(diff < 0.15 && dist < 900){
+        if(!best || dist < best.dist) best = {e,dist};
+      }
+    });
+    if(best){
+      best.e.hp -= 15;
+      // hit feedback
+      if(best.e.hp <= 0){
+        best.e.alive = false;
+        showMessage("Ennemi éliminé",800);
+      } else {
+        showMessage("Touché",300);
+      }
+    }
+  }
+  function flash(){
+    const g = document.createElement('div');
+    g.style.position='fixed'; g.style.left=0; g.style.top=0; g.style.width='100%'; g.style.height='100%';
+    g.style.background='rgba(255,255,200,0.06)'; g.style.zIndex=9999; document.body.appendChild(g);
+    setTimeout(()=>document.body.removeChild(g),60);
+  }
+
+  // game update loop
+  function update(dt){
+    // movement from keys or joystick
+    const moveSpeed = 120; // pixels per second
+    const rotSpeed = 2.2;
+    let mv = 0, str=0;
+    if(keys['w']) mv += 1;
+    if(keys['s']) mv -= 1;
+    if(keys['a']) str -= 1;
+    if(keys['d']) str += 1;
+    mv += stickPos.y * -1; // up is negative y on stick
+    str += stickPos.x;
+    // rotation (keyboard)
+    if(keys['arrowleft']) player.ang -= rotSpeed * dt;
+    if(keys['arrowright']) player.ang += rotSpeed * dt;
+    // compute new position
+    const nx = player.x + Math.cos(player.ang) * mv * moveSpeed * dt + Math.cos(player.ang + Math.PI/2) * str * moveSpeed * dt;
+    const ny = player.y + Math.sin(player.ang) * mv * moveSpeed * dt + Math.sin(player.ang + Math.PI/2) * str * moveSpeed * dt;
+    // collision simple: check 3 points
+    if(!isBlocked(nx, player.y)) player.x = nx; 
+    if(!isBlocked(player.x, ny)) player.y = ny;
+
+    // enemies: simple AI - rotate towards player and move slowly
+    enemies.forEach(e => {
+      if(!e.alive) return;
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const dist = Math.hypot(dx,dy);
+      if(dist < 260){
+        // move away a bit or toward? make them approach
+        const nx = e.x + dx/dist * 30 * dt;
+        const ny = e.y + dy/dist * 30 * dt;
+        if(!isBlocked(nx, ny)){ e.x = nx; e.y = ny; }
+      }
+      // if very close, damage player
+      if(dist < 28){
+        player.hp -= 18 * dt; // HP drain per second
+      }
+    });
+
+    // update HUD and check death
+    player.hp = Math.max(0, player.hp);
+    hudHP.textContent = Math.floor(player.hp);
+    if(player.hp <= 0){ showMessage("Tu es mort. Appuie Restart.", 2000); }
+  }
+
+  // main loop
+  function loop(t){
+    const dt = Math.min(0.05, (t - lastTime)/1000);
+    lastTime = t;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // init
+  hudAmmo.textContent = player.ammo;
+  hudHP.textContent = player.hp;
+  loop(performance.now());
+
+  // simple instructions overlay at start
+  showMessage("Déplace-toi avec le joystick gauche. Regarde à droite pour tirer. Bouton TIR pour shooter.", 3500);
+
+  // expose some functions for console debug
+  window.retrofps = {player, enemies, fire, resetGame};
+
+  // guidance: allow downloading an icon? not needed.
+})();
+</script>
+</body>
+</html>
